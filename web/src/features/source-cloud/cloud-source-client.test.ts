@@ -2,7 +2,87 @@ import { describe, expect, it, vi } from "vitest";
 import { CloudSourceClient } from "./cloud-source-client.js";
 
 describe("CloudSourceClient", () => {
-  it("uploads novel source through the app bridge tool when available", async () => {
+  it("uploads novel source to the component endpoint instead of sending full text through the bridge", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        sourceManifest: {
+          sourceId: "source-direct",
+          sourceKind: "pasted_text",
+          contentHash: "d".repeat(64),
+          segmentationVersion: 3,
+          paragraphCount: 1,
+          cloudSync: {
+            enabled: true,
+            provider: "r2",
+            objectKey: "private/sources/source-direct/source.txt"
+          }
+        }
+      })
+    );
+    const toolCaller = vi.fn();
+    const client = new CloudSourceClient("/source/secret", fetchMock, toolCaller);
+
+    const result = await client.uploadNovelSource({
+      sessionId: "session-1",
+      title: "Direct book",
+      sourceText: "private novel text"
+    });
+
+    expect(toolCaller).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/source/secret/upload",
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      sessionId: "session-1",
+      sourceKind: "pasted_text",
+      title: "Direct book",
+      sourceText: "private novel text"
+    });
+    expect(result.sourceManifest?.cloudSync.enabled).toBe(true);
+  });
+
+  it("uploads 3.5 MiB and 4.9 MiB Chinese novels directly without the bridge", async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(jsonResponse({
+        sourceManifest: {
+          sourceId: "source-large",
+          sourceKind: "pasted_text",
+          contentHash: "e".repeat(64),
+          segmentationVersion: 3,
+          paragraphCount: 12,
+          cloudSync: { enabled: true, provider: "r2", objectKey: "private/sources/source-large/source.txt" }
+        }
+      }))
+    );
+    const toolCaller = vi.fn();
+    const client = new CloudSourceClient("https://worker.example.test/source/secret", fetchMock, toolCaller);
+
+    for (const byteSize of [
+      Math.floor(2.5 * 1024 * 1024),
+      Math.floor(3.5 * 1024 * 1024),
+      Math.floor(4.9 * 1024 * 1024)
+    ]) {
+      fetchMock.mockClear();
+      toolCaller.mockClear();
+      const sourceText = makeChineseText(byteSize);
+
+      const result = await client.uploadNovelSource({
+        sessionId: "session-large",
+        title: "大文件",
+        sourceText
+      });
+
+      expect(toolCaller).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://worker.example.test/source/secret/upload",
+        expect.objectContaining({ method: "POST" })
+      );
+      expect(result.sourceManifest?.cloudSync.enabled).toBe(true);
+    }
+  });
+
+  it("uses the bridge only as a small-text fallback when no private source endpoint exists", async () => {
     const fetchMock = vi.fn();
     const sourceManifest = {
       sourceId: "source-bridge",
@@ -27,7 +107,7 @@ describe("CloudSourceClient", () => {
       },
       _meta: { sourceManifest }
     });
-    const client = new CloudSourceClient("/source/secret", fetchMock, toolCaller);
+    const client = new CloudSourceClient("/source", fetchMock, toolCaller);
 
     const result = await client.uploadNovelSource({
       sessionId: "session-1",
@@ -44,6 +124,23 @@ describe("CloudSourceClient", () => {
     });
     expect(result.sourceManifest).toBe(sourceManifest);
     expect(JSON.stringify(toolCaller.mock.results)).not.toContain("private novel text");
+  });
+
+  it("refuses to send large novels through the bridge when no source endpoint exists", async () => {
+    const fetchMock = vi.fn();
+    const toolCaller = vi.fn();
+    const client = new CloudSourceClient("/source", fetchMock, toolCaller);
+
+    const result = await client.uploadNovelSource({
+      sessionId: "session-large",
+      sourceText: makeChineseText(Math.floor(3.5 * 1024 * 1024))
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(toolCaller).not.toHaveBeenCalled();
+    expect(result.sourceManifest).toBeUndefined();
+    expect(result.diagnostics.bridgeUploadStatus).toBe("failure");
+    expect(result.diagnostics.bridgeUploadError).toContain("too large for bridge upload");
   });
 
   it("uploads novel source to the component-only endpoint", async () => {
@@ -148,7 +245,7 @@ describe("CloudSourceClient", () => {
     });
     const message = result.diagnostics.directUploadError ?? "";
 
-    expect(message).toContain("resourceVersion=app-v17");
+    expect(message).toContain("resourceVersion=app-v19");
     expect(message).toContain("appVersion=0.2.2");
     expect(message).toContain("sourceEndpointBase=present");
     expect(message).toContain("uploadOrigin=https://worker.example.test");
@@ -172,7 +269,7 @@ describe("CloudSourceClient", () => {
         cloudSync: { enabled: true, provider: "r2" }
       }
     });
-    const client = new CloudSourceClient("https://worker.example.test/source/secret", fetchMock, toolCaller);
+    const client = new CloudSourceClient("/source", fetchMock, toolCaller);
 
     const result = await client.uploadNovelSource({
       sessionId: "session-1",
@@ -273,4 +370,9 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" }
   });
+}
+
+function makeChineseText(targetBytes: number): string {
+  const unit = "春";
+  return unit.repeat(Math.ceil(targetBytes / new Blob([unit]).size));
 }

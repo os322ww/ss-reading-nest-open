@@ -73,6 +73,31 @@ import { IndexedDbReadingCache } from "./storage/indexeddb-cache.js";
 
 type Screen = "home" | "setup" | "novel" | "manga";
 type Overlay = "cache" | "more" | "diary" | "management" | null;
+type ImportProgress = {
+  stage:
+    | "idle"
+    | "reading"
+    | "ready"
+    | "segmenting"
+    | "creating_session"
+    | "uploading"
+    | "saving_manifest"
+    | "saving_cache"
+    | "done"
+    | "failed";
+  fileName?: string;
+  fileSize?: number;
+  decodedTextLength?: number;
+  sourceEndpointBasePresent?: boolean;
+  uploadStatus?: string;
+  sourceId?: string;
+  sizeBytes?: number;
+  paragraphCount?: number;
+  sessionId?: string;
+  indexedDbStatus?: "not_started" | "success" | "failure";
+  screen?: Screen;
+  message?: string;
+};
 type OpenOutput = {
   bookshelfSessions?: Array<SessionBundle & { cacheState?: string }>;
   recentSessions?: Array<SessionBundle & { cacheState?: string }>;
@@ -82,12 +107,15 @@ type OpenOutput = {
 const cache = new IndexedDbReadingCache();
 const DEEP_ANALYSIS_DOCK_TEXT = "已生成长评，可回聊天区查看。";
 const MAX_NOVEL_FILE_SIZE = 5 * 1024 * 1024;
+const LARGE_NOVEL_TEXTAREA_PREVIEW_BYTES = 2 * 1024 * 1024;
+const LARGE_NOVEL_TEXTAREA_PREVIEW_CHARS = 1200;
 
 export function App() {
   const initial = initialToolOutput<OpenOutput>();
+  const sourceEndpointBase = initial?.sourceEndpointBase ?? deriveSourceEndpointBase();
   const cloudSourceClient = useMemo(
-    () => new CloudSourceClient(initial?.sourceEndpointBase ?? deriveSourceEndpointBase(), undefined, callTool),
-    [initial?.sourceEndpointBase]
+    () => new CloudSourceClient(sourceEndpointBase, undefined, callTool),
+    [sourceEndpointBase]
   );
   const [restoredWidgetState] = useState(() => initialWidgetState());
   const [screen, setScreen] = useState<Screen>(() =>
@@ -127,6 +155,7 @@ export function App() {
   const [pendingCommentSaving, setPendingCommentSaving] = useState(false);
   const [manualSaveRevision, setManualSaveRevision] = useState(0);
   const [startReadingInFlight, setStartReadingInFlight] = useState(false);
+  const [importProgress, setImportProgress] = useState<ImportProgress>({ stage: "idle" });
   const [readerImmersive, setReaderImmersive] = useState(
     restoredWidgetState?.immersive ?? false
   );
@@ -639,41 +668,155 @@ export function App() {
     if (!file) return;
     if (!/\.(txt|md|markdown)$/i.test(file.name)) {
       setToast("目前只支持 TXT / Markdown 文档。");
+      setImportProgress({
+        stage: "failed",
+        fileName: file.name,
+        fileSize: file.size,
+        sourceEndpointBasePresent: Boolean(sourceEndpointBase),
+        screen,
+        message: "不支持的文件格式"
+      });
       return;
     }
     if (file.size > MAX_NOVEL_FILE_SIZE) {
       setToast("文档超过 5 MB，请拆分后再导入。");
+      setImportProgress({
+        stage: "failed",
+        fileName: file.name,
+        fileSize: file.size,
+        sourceEndpointBasePresent: Boolean(sourceEndpointBase),
+        screen,
+        message: "文件超过 5 MB"
+      });
       return;
     }
 
+    setImportProgress({
+      stage: "reading",
+      fileName: file.name,
+      fileSize: file.size,
+      sourceEndpointBasePresent: Boolean(sourceEndpointBase),
+      screen,
+      message: "正在读取文件"
+    });
     const reader = new FileReader();
     reader.onload = () => {
-      if (typeof reader.result !== "string") {
+      const result = reader.result;
+      if (typeof result !== "string") {
         setToast("读取失败，请确认文件是 UTF-8 文本，或改用复制粘贴。");
+        setImportProgress((current) => ({
+          ...current,
+          stage: "failed",
+          screen,
+          message: "读取失败"
+        }));
         return;
       }
-      setSourceText(reader.result);
+      if (!result.trim()) {
+        setSourceText("");
+        setToast("文档解析为空，请确认是 UTF-8 文本，或改用复制粘贴。");
+        setImportProgress((current) => ({
+          ...current,
+          stage: "failed",
+          decodedTextLength: result.length,
+          screen,
+          message: "解析为空"
+        }));
+        return;
+      }
+      setSourceText(result);
       setTitle((current) => current.trim() || file.name.replace(/\.(txt|md|markdown)$/i, ""));
+      setImportProgress((current) => ({
+        ...current,
+        stage: "ready",
+        decodedTextLength: result.length,
+        sourceEndpointBasePresent: Boolean(sourceEndpointBase),
+        screen,
+        message: file.size > LARGE_NOVEL_TEXTAREA_PREVIEW_BYTES ? "大文件已读取，准备分段" : "文档已读取"
+      }));
       setToast("文档已导入，你仍然可以继续编辑正文。");
     };
-    reader.onerror = () => setToast("读取失败，请确认文件是 UTF-8 文本，或改用复制粘贴。");
+    reader.onerror = () => {
+      setToast("读取失败，请确认文件是 UTF-8 文本，或改用复制粘贴。");
+      setImportProgress((current) => ({
+        ...current,
+        stage: "failed",
+        screen,
+        message: "读取失败"
+      }));
+    };
     reader.readAsText(file, "UTF-8");
   }
 
   async function startReading() {
-    const novelChunks = setupType === "novel" ? splitNovelText(sourceText) : [];
     if (!title.trim()) return setToast("请先填写作品名。");
-    if (setupType === "novel" && novelChunks.length === 0) return setToast("请先粘贴小说正文。");
+    if (setupType === "novel" && !sourceText.trim()) {
+      setImportProgress((current) => ({
+        ...current,
+        stage: "failed",
+        screen,
+        message: "正文为空"
+      }));
+      return setToast("请先粘贴小说正文。");
+    }
     if (setupType === "manga" && selectedFiles.length === 0) return setToast("请先导入漫画图片。");
+
+    let novelChunks: string[] = [];
+    if (setupType === "novel") {
+      setImportProgress((current) => ({
+        ...current,
+        stage: "segmenting",
+        decodedTextLength: sourceText.length,
+        sourceEndpointBasePresent: Boolean(sourceEndpointBase),
+        indexedDbStatus: "not_started",
+        screen,
+        message: "正在分段"
+      }));
+      await nextFrame();
+      novelChunks = splitNovelText(sourceText);
+      if (novelChunks.length === 0) {
+        setImportProgress((current) => ({
+          ...current,
+          stage: "failed",
+          paragraphCount: 0,
+          screen,
+          message: "正文为空"
+        }));
+        return setToast("请先粘贴小说正文。");
+      }
+      setImportProgress((current) => ({
+        ...current,
+        paragraphCount: novelChunks.length,
+        screen,
+        message: "分段完成"
+      }));
+      await nextFrame();
+    }
 
     let session = existingSession;
     if (!session) {
+      setImportProgress((current) => ({
+        ...current,
+        stage: "creating_session",
+        paragraphCount: setupType === "novel" ? novelChunks.length : current.paragraphCount,
+        screen,
+        message: "正在创建阅读小窝"
+      }));
+      await nextFrame();
       const result = await callTool("start_reading_session", { title: title.trim(), type: setupType });
       session = ensureSessionDefaults(
         result.structuredContent?.session as ReadingSession | undefined ??
           createLocalSession(title.trim(), setupType)
       );
     }
+    if (!session) throw new Error("Failed to create reading session");
+    setImportProgress((current) => ({
+      ...current,
+      sessionId: session?.id,
+      screen,
+      message: "阅读小窝已创建"
+    }));
+    await nextFrame();
     let sourceManifest =
       setupType === "novel"
         ? await createNovelSourceManifest({
@@ -700,19 +843,52 @@ export function App() {
     let cloudDiagnostics: CloudUploadDiagnostics | undefined;
     let serverSideCloudUploadOnly = false;
     if (setupType === "novel") {
+      const sessionId = session.id;
+      setImportProgress((current) => ({
+        ...current,
+        stage: "uploading",
+        sessionId,
+        paragraphCount: novelChunks.length,
+        sourceEndpointBasePresent: Boolean(sourceEndpointBase),
+        uploadStatus: "started",
+        screen,
+        message: "正在上传云端正文"
+      }));
+      await nextFrame();
       const upload = await cloudSourceClient.uploadNovelSource({
-          sessionId: session.id,
+          sessionId,
           title: title.trim(),
           sourceText
         });
       cloudDiagnostics = upload.diagnostics;
       if (upload.sourceManifest?.cloudSync.enabled) {
         sourceManifest = upload.sourceManifest;
+        setImportProgress((current) => ({
+          ...current,
+          uploadStatus: "success",
+          sourceId: sourceManifest.sourceId,
+          sizeBytes: sourceManifest.cloudSync.sizeBytes,
+          paragraphCount: sourceManifest.paragraphCount ?? novelChunks.length,
+          screen,
+          message: "云端正文已上传"
+        }));
       } else if (upload.diagnostics.bridgeUploadStatus === "success") {
         serverSideCloudUploadOnly = true;
+        setImportProgress((current) => ({
+          ...current,
+          uploadStatus: "success",
+          screen,
+          message: "云端正文已上传"
+        }));
       } else {
         cloudUploadFailed = true;
         cloudUploadError = formatCloudUploadDiagnostics(upload.diagnostics);
+        setImportProgress((current) => ({
+          ...current,
+          uploadStatus: upload.diagnostics.directUploadStatus,
+          screen,
+          message: "云端上传失败，继续创建本地阅读"
+        }));
       }
     } else {
       const upload = await cloudSourceClient.uploadMangaSource({
@@ -739,6 +915,16 @@ export function App() {
     if (!serverSideCloudUploadOnly) {
       setSourceManifestCalled = true;
       try {
+        setImportProgress((current) => ({
+          ...current,
+          stage: "saving_manifest",
+          sessionId: session?.id,
+          paragraphCount: sourceManifest.paragraphCount ?? current.paragraphCount,
+          sourceId: sourceManifest.sourceId,
+          screen,
+          message: "正在保存正文信息"
+        }));
+        await nextFrame();
         await callTool("set_source_manifest", {
           sessionId: session.id,
           sourceManifest
@@ -785,9 +971,34 @@ export function App() {
       setRemembered(true);
       setScreen("novel");
       try {
+        setImportProgress((current) => ({
+          ...current,
+          stage: "saving_cache",
+          sessionId: session.id,
+          paragraphCount: novelChunks.length,
+          sourceId: sourceManifest.sourceId,
+          indexedDbStatus: "not_started",
+          screen: "novel",
+          message: "正在保存本设备缓存"
+        }));
+        await nextFrame();
         await rememberNovel(session, sourceText, novelChunks, sourceManifest);
+        setImportProgress((current) => ({
+          ...current,
+          stage: "done",
+          indexedDbStatus: "success",
+          screen: "novel",
+          message: "导入完成"
+        }));
       } catch {
         setRemembered(false);
+        setImportProgress((current) => ({
+          ...current,
+          stage: "done",
+          indexedDbStatus: "failure",
+          screen: "novel",
+          message: "本设备缓存写入失败，已进入阅读页"
+        }));
         setToast(
           cloudUploadFailed
             ? `云端同步失败：${cloudUploadError}；本设备正文缓存写入失败，当前仍可继续阅读，请保留原文。`
@@ -1797,6 +2008,14 @@ export function App() {
     void continueReading(item);
   }, [recent, restoredWidgetState]);
 
+  const usingLargeNovelPreview =
+    setupType === "novel" &&
+    sourceText.length > LARGE_NOVEL_TEXTAREA_PREVIEW_CHARS &&
+    (importProgress.fileSize ?? 0) > LARGE_NOVEL_TEXTAREA_PREVIEW_BYTES;
+  const sourceTextInputValue = usingLargeNovelPreview
+    ? `${sourceText.slice(0, LARGE_NOVEL_TEXTAREA_PREVIEW_CHARS)}\n\n（大文件已读取，输入框只显示预览；进入阅读时会使用完整正文。）`
+    : sourceText;
+
   return (
     <div className="app">
       {screen === "home" ? (
@@ -1817,7 +2036,22 @@ export function App() {
           {setupType === "novel" ? (
             <div className="novel-source-field">
               <label htmlFor="novel-source-text">小说正文</label>
-              <textarea id="novel-source-text" className="source-input" value={sourceText} onChange={(e) => setSourceText(e.target.value)} placeholder="粘贴 TXT 或 Markdown 文本" />
+              <textarea
+                id="novel-source-text"
+                className="source-input"
+                value={sourceTextInputValue}
+                readOnly={usingLargeNovelPreview}
+                onChange={(e) => {
+                  setSourceText(e.target.value);
+                  setImportProgress({ stage: "idle" });
+                }}
+                placeholder="粘贴 TXT 或 Markdown 文本"
+              />
+              {usingLargeNovelPreview ? (
+                <p className="source-preview-note">
+                  大文件已读取，正文不在输入框里完整展开，避免 iPad 卡住；进入阅读后会使用完整内容。
+                </p>
+              ) : null}
               <div className="source-import-row">
                 <label className="source-import-button">
                   上传 TXT / Markdown
@@ -1833,6 +2067,7 @@ export function App() {
                 </label>
                 <span>目前支持 TXT / Markdown，更多格式后续支持。</span>
               </div>
+              <ImportProgressPanel progress={importProgress} />
             </div>
           ) : (
             <label className="file-drop">导入漫画图片<input type="file" accept="image/*" multiple onChange={(e) => setSelectedFiles(Array.from(e.target.files ?? []))} /><span>{selectedFiles.length ? `已选择 ${selectedFiles.length} 张` : "点击选择多张图片"}</span></label>
@@ -2049,6 +2284,57 @@ function formatCloudUploadDiagnostics(
     `setSourceManifestStatus=${extra.setSourceManifestStatus ?? "not_called"}`,
     extra.cloudStatus ? `cloudStatus=${extra.cloudStatus}` : ""
   ].filter(Boolean).join("；");
+}
+
+function ImportProgressPanel({ progress }: { progress: ImportProgress }) {
+  if (progress.stage === "idle") return null;
+  return (
+    <section className="import-progress" aria-label="导入诊断">
+      <strong>导入诊断</strong>
+      <p>阶段：{importStageLabel(progress.stage)}</p>
+      {progress.fileName ? <p>文件：{progress.fileName}</p> : null}
+      {typeof progress.fileSize === "number" ? <p>File.size：{formatBytes(progress.fileSize)}</p> : null}
+      {typeof progress.decodedTextLength === "number" ? <p>decodedTextLength：{progress.decodedTextLength}</p> : null}
+      <p>sourceEndpointBase：{progress.sourceEndpointBasePresent ? "present" : "missing"}</p>
+      {progress.uploadStatus ? <p>upload：{progress.uploadStatus}</p> : null}
+      {progress.sourceId ? <p>sourceId：{progress.sourceId}</p> : null}
+      {typeof progress.sizeBytes === "number" ? <p>sizeBytes：{progress.sizeBytes}</p> : null}
+      {typeof progress.paragraphCount === "number" ? <p>paragraphCount：{progress.paragraphCount}</p> : null}
+      {progress.sessionId ? <p>sessionId：{progress.sessionId}</p> : null}
+      {progress.indexedDbStatus ? <p>IndexedDB：{progress.indexedDbStatus}</p> : null}
+      {progress.screen ? <p>screen：{progress.screen}</p> : null}
+      {progress.message ? <p>message：{progress.message}</p> : null}
+    </section>
+  );
+}
+
+function importStageLabel(stage: ImportProgress["stage"]) {
+  const labels: Record<ImportProgress["stage"], string> = {
+    idle: "等待",
+    reading: "读取文件",
+    ready: "读取完成",
+    segmenting: "正在分段",
+    creating_session: "创建 session",
+    uploading: "上传云端",
+    saving_manifest: "保存 manifest",
+    saving_cache: "保存本机缓存",
+    done: "完成",
+    failed: "失败"
+  };
+  return labels[stage];
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function nextFrame() {
+  return new Promise<void>((resolve) => {
+    if (typeof window === "undefined") return resolve();
+    window.setTimeout(resolve, 0);
+  });
 }
 
 function deriveSourceEndpointBase(): string {

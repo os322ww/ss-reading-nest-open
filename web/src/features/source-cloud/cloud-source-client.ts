@@ -20,8 +20,9 @@ export interface CloudSourceUploadResult {
   diagnostics: CloudUploadDiagnostics;
 }
 
-const RESOURCE_VERSION = "app-v17";
+const RESOURCE_VERSION = "app-v19";
 const APP_VERSION = "0.2.2";
+const MAX_BRIDGE_NOVEL_UPLOAD_BYTES = 2 * 1024 * 1024;
 
 export class CloudSourceClient {
   constructor(
@@ -35,13 +36,33 @@ export class CloudSourceClient {
     title?: string;
     sourceText: string;
   }): Promise<CloudSourceUploadResult> {
-    if (this.toolCaller) {
+    if (hasPrivateSourceEndpoint(this.endpointBase)) {
+      return this.uploadViaDirect({
+        sessionId: input.sessionId,
+        sourceKind: "pasted_text",
+        ...(input.title ? { title: input.title } : {}),
+        sourceText: input.sourceText
+      });
+    }
+    if (this.toolCaller && new Blob([input.sourceText]).size <= MAX_BRIDGE_NOVEL_UPLOAD_BYTES) {
       return this.uploadViaTool({
         sessionId: input.sessionId,
         sourceKind: "pasted_text",
         ...(input.title ? { title: input.title } : {}),
         sourceText: input.sourceText
       });
+    }
+    if (this.toolCaller) {
+      return {
+        diagnostics: {
+          bridgeToolAvailable: true,
+          bridgeUploadStarted: false,
+          bridgeUploadStatus: "failure",
+          bridgeUploadError: "source text too large for bridge upload; use private source endpoint",
+          directUploadStarted: false,
+          directUploadStatus: "not_started"
+        }
+      };
     }
     return this.uploadViaDirect({
       sessionId: input.sessionId,
@@ -197,6 +218,15 @@ export class CloudSourceClient {
         }
       };
     }
+  }
+}
+
+function hasPrivateSourceEndpoint(endpointBase: string): boolean {
+  try {
+    const url = new URL(endpointBase, window.location.href);
+    return /\/source\/[^/]+$/.test(url.pathname);
+  } catch {
+    return /\/source\/[^/]+$/.test(endpointBase);
   }
 }
 

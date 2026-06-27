@@ -96,6 +96,100 @@ describe("App", () => {
     expect(screen.getByLabelText("作品名")).toHaveValue("长篇");
   });
 
+  it("shows import diagnostics and enters the reader for a 3.5 MiB novel file", async () => {
+    const deviceCache = new IndexedDbReadingCache();
+    await deviceCache.remove("large-file-session");
+    const content = makeChineseText(Math.floor(3.5 * 1024 * 1024));
+    const cloudManifest: SourceManifest = {
+      sourceId: "large-file-source",
+      sourceKind: "pasted_text",
+      contentHash: "e".repeat(64),
+      segmentationVersion: 3,
+      paragraphCount: 5,
+      cloudSync: {
+        enabled: true,
+        provider: "r2",
+        objectKey: "private/sources/large-file-source/source.txt",
+        manifestObjectKey: "private/sources/large-file-source/manifest.json",
+        sizeBytes: new Blob([content]).size,
+        mimeType: "text/plain; charset=utf-8"
+      }
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ sourceManifest: cloudManifest })));
+    const callTool = vi.fn(async (name: string, args: Record<string, any>) => {
+      if (name === "start_reading_session") {
+        return {
+          structuredContent: {
+            session: {
+              id: "large-file-session",
+              title: "大文件导入",
+              type: "novel",
+              status: "active",
+              userCurrentPosition: { kind: "paragraph", index: 1, total: 5, label: "第 1 段" },
+              assistantSyncedPosition: null,
+              liveReadingEnabled: false,
+              sourceManifest: null,
+              createdAt: "2026-06-27T00:00:00.000Z",
+              updatedAt: "2026-06-27T00:00:00.000Z",
+              lastReadAt: "2026-06-27T00:00:00.000Z"
+            }
+          }
+        };
+      }
+      if (name === "set_source_manifest") {
+        return { structuredContent: { sourceManifest: args.sourceManifest } };
+      }
+      return { structuredContent: {} };
+    });
+    Object.defineProperty(window, "openai", {
+      configurable: true,
+      value: {
+        toolOutput: { recentSessions: [], sourceEndpointBase: "https://worker.example.test/source/secret" },
+        callTool,
+        requestDisplayMode: vi.fn(),
+        setWidgetState: vi.fn()
+      }
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /小说共读/ }));
+    fireEvent.change(screen.getByLabelText("上传 TXT / Markdown"), {
+      target: { files: [new File([content], "大文件导入.txt", { type: "text/plain" })] }
+    });
+
+    expect(await screen.findByText("导入诊断")).toBeInTheDocument();
+    expect(await screen.findByText(/阶段：读取完成/)).toBeInTheDocument();
+    expect(screen.getByLabelText("作品名")).toHaveValue("大文件导入");
+    expect(screen.getByText(/文件：大文件导入.txt/)).toBeInTheDocument();
+    expect(screen.getByText(/sourceEndpointBase：present/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "进入阅读小窝" }));
+
+    expect(await screen.findByText(/用户读到：第 1 段/)).toBeInTheDocument();
+    expect(screen.getByText(content.slice(0, 20), { exact: false })).toBeInTheDocument();
+    expect(await deviceCache.get("large-file-session")).toMatchObject({
+      metadata: {
+        sourceManifest: expect.objectContaining({
+          cloudSync: expect.objectContaining({ enabled: true })
+        })
+      }
+    });
+    await deviceCache.remove("large-file-session");
+  });
+
+  it("reports an empty decoded novel file instead of creating a blank reader", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /小说共读/ }));
+
+    fireEvent.change(screen.getByLabelText("上传 TXT / Markdown"), {
+      target: { files: [new File(["   \n\t"], "空文件.txt", { type: "text/plain" })] }
+    });
+
+    expect(await screen.findByText("文档解析为空，请确认是 UTF-8 文本，或改用复制粘贴。")).toBeInTheDocument();
+    expect(screen.getByText("导入诊断")).toBeInTheDocument();
+    expect(screen.getByText(/阶段：失败/)).toBeInTheDocument();
+  });
+
   it("rejects novel files larger than 5 MiB", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /小说共读/ }));
@@ -1472,7 +1566,7 @@ describe("App", () => {
     await deviceCache.remove("ipad-refresh-session");
   });
 
-  it("uploads new novels through the app bridge and keeps source text out of assistant-visible state", async () => {
+  it("uploads new novels through the private source endpoint and keeps source text out of assistant-visible state", async () => {
     const deviceCache = new IndexedDbReadingCache();
     await deviceCache.remove("cloud-upload-session");
     const sourceText = "云端第一段。\n\n云端第二段。";
@@ -1515,19 +1609,6 @@ describe("App", () => {
           }
         };
       }
-      if (name === "upload_cloud_source") {
-        return {
-          structuredContent: {
-            uploaded: true,
-            sessionId: "cloud-upload-session",
-            sourceId: "cloud-upload-source",
-            contentHash: cloudManifest.contentHash,
-            paragraphCount: 2,
-            cloudSync: { enabled: true, provider: "r2" }
-          },
-          _meta: { sourceManifest: cloudManifest }
-        };
-      }
       if (name === "set_source_manifest") {
         return { structuredContent: { sourceManifest: args.sourceManifest } };
       }
@@ -1555,15 +1636,18 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "进入阅读小窝" }));
 
     expect(await screen.findByText("用户读到：第 1 段")).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(callTool).toHaveBeenCalledWith(
-      "upload_cloud_source",
-      expect.objectContaining({
-        sessionId: "cloud-upload-session",
-        sourceKind: "pasted_text",
-        sourceText
-      })
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://worker.example.test/source/secret/upload",
+      expect.objectContaining({ method: "POST" })
     );
+    const firstUploadCall = fetchMock.mock.calls[0] as [string, RequestInit] | undefined;
+    const uploadRequest = firstUploadCall?.[1];
+    expect(JSON.parse(String(uploadRequest?.body))).toMatchObject({
+      sessionId: "cloud-upload-session",
+      sourceKind: "pasted_text",
+      sourceText
+    });
+    expect(callTool).not.toHaveBeenCalledWith("upload_cloud_source", expect.anything());
     expect(callTool).toHaveBeenCalledWith(
       "set_source_manifest",
       expect.objectContaining({
@@ -1582,6 +1666,89 @@ describe("App", () => {
     });
     expect(JSON.stringify(setWidgetState.mock.calls)).not.toContain(sourceText);
     await deviceCache.remove("cloud-upload-session");
+  });
+
+  it("enters the reader after uploading a 3.5 MiB Chinese novel through the private endpoint", async () => {
+    const deviceCache = new IndexedDbReadingCache();
+    await deviceCache.remove("large-cloud-upload-session");
+    const sourceText = makeChineseText(Math.floor(3.5 * 1024 * 1024));
+    const cloudManifest: SourceManifest = {
+      sourceId: "large-cloud-upload-source",
+      sourceKind: "pasted_text",
+      contentHash: "f".repeat(64),
+      segmentationVersion: 3,
+      paragraphCount: 8,
+      cloudSync: {
+        enabled: true,
+        provider: "r2",
+        objectKey: "private/sources/large-cloud-upload-source/source.txt",
+        manifestObjectKey: "private/sources/large-cloud-upload-source/manifest.json",
+        sizeBytes: new Blob([sourceText]).size,
+        mimeType: "text/plain; charset=utf-8"
+      }
+    };
+    const fetchMock = vi.fn(async () => jsonResponse({ sourceManifest: cloudManifest }));
+    vi.stubGlobal("fetch", fetchMock);
+    const callTool = vi.fn(async (name: string, args: Record<string, any>) => {
+      if (name === "start_reading_session") {
+        return {
+          structuredContent: {
+            session: {
+              id: "large-cloud-upload-session",
+              title: "大文件测试",
+              type: "novel",
+              status: "active",
+              userCurrentPosition: { kind: "paragraph", index: 1, total: 8, label: "第 1 段" },
+              assistantSyncedPosition: null,
+              liveReadingEnabled: false,
+              sourceManifest: null,
+              createdAt: "2026-06-27T00:00:00.000Z",
+              updatedAt: "2026-06-27T00:00:00.000Z",
+              lastReadAt: "2026-06-27T00:00:00.000Z"
+            }
+          }
+        };
+      }
+      if (name === "set_source_manifest") {
+        return { structuredContent: { sourceManifest: args.sourceManifest } };
+      }
+      return { structuredContent: {} };
+    });
+    Object.defineProperty(window, "openai", {
+      configurable: true,
+      value: {
+        toolOutput: {
+          recentSessions: [],
+          sourceEndpointBase: "https://worker.example.test/source/secret"
+        },
+        callTool,
+        requestDisplayMode: vi.fn(),
+        setWidgetState: vi.fn()
+      }
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /小说共读/ }));
+    fireEvent.change(screen.getByLabelText("作品名"), { target: { value: "大文件测试" } });
+    fireEvent.change(screen.getByPlaceholderText("粘贴 TXT 或 Markdown 文本"), {
+      target: { value: sourceText }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "进入阅读小窝" }));
+
+    expect(await screen.findByText(/用户读到：第 1 段/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://worker.example.test/source/secret/upload",
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(callTool).not.toHaveBeenCalledWith("upload_cloud_source", expect.anything());
+    expect(await deviceCache.get("large-cloud-upload-session")).toMatchObject({
+      metadata: {
+        sourceManifest: expect.objectContaining({
+          cloudSync: expect.objectContaining({ enabled: true })
+        })
+      }
+    });
+    await deviceCache.remove("large-cloud-upload-session");
   });
 
   it("does not overwrite a server-side bridge upload when private manifest metadata is unavailable", async () => {
@@ -1635,8 +1802,7 @@ describe("App", () => {
       configurable: true,
       value: {
         toolOutput: {
-          recentSessions: [],
-          sourceEndpointBase: "https://worker.example.test/source/secret"
+          recentSessions: []
         },
         callTool,
         requestDisplayMode: vi.fn(),
@@ -2438,6 +2604,11 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" }
   });
+}
+
+function makeChineseText(targetBytes: number): string {
+  const unit = "春";
+  return unit.repeat(Math.ceil(targetBytes / new Blob([unit]).size));
 }
 
 function novelCache(
