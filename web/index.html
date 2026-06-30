@@ -4,67 +4,36 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <style>
-       body {
-        margin: 0;
-        padding: 0;
-      
-        min-height: 100vh;
-        width: 100%;
-      
-        background: #0f0f10;
-        color: #e8e8e8;
-      
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
-          "PingFang SC", "Helvetica Neue", "Noto Sans SC", sans-serif;
-      
-        -webkit-font-smoothing: antialiased;
-        -moz-osx-font-smoothing: grayscale;
-      
-        line-height: 1.6;
-        font-size: 16px;
-        letter-spacing: 0.2px;
-      }
-        :root {
-          /* ===== 背景层级 ===== */
+       :root {
           --bg: #0f0f10;
           --panel: #17171a;
           --card: #1f1f23;
         
-          /* ===== 文字层级（关键修复）===== */
-          --text-primary: #f5f5f5;     /* 主文字 */
-          --text-secondary: rgba(255,255,255,0.72); /* 次文字 */
-          --text-muted: rgba(255,255,255,0.55);      /* 弱文字 */
+          --text: #f5f5f5;
+          --text-secondary: rgba(255,255,255,0.72);
+          --text-muted: rgba(255,255,255,0.55);
         
-          /* ===== 边框 ===== */
           --border: rgba(255,255,255,0.08);
-        
-          /* ===== 强调色 ===== */
           --accent: #7c5cff;
-        
-          /* ===== 状态色（可扩展）===== */
-          --success: #2ecc71;
-          --warning: #f1c40f;
-          --danger: #e74c3c;
         }
         
-        /* ===== 全局基础 ===== */
+        /* ===== 基础 ===== */
         body {
           margin: 0;
           padding: 0;
+          min-height: 100vh;
         
           background: var(--bg);
-          color: var(--text-primary);
+          color: var(--text);
         
-          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
-            "PingFang SC", "Helvetica Neue", "Inter", sans-serif;
+          font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+            "SF Pro Text", "Helvetica Neue", sans-serif;
         
           -webkit-font-smoothing: antialiased;
-          -moz-osx-font-smoothing: grayscale;
-        
           line-height: 1.6;
         }
         
-        /* ===== App 容器（消灭黑边关键）===== */
+        /* ===== App容器（防黑边关键）===== */
         #root {
           min-height: 100vh;
           width: 100%;
@@ -73,7 +42,7 @@
           background: radial-gradient(circle at top, #1a1a1f, #0f0f10);
         }
         
-        /* ===== 卡片系统（Notion核心）===== */
+        /* ===== 卡片 ===== */
         .card {
           background: var(--card);
           border: 1px solid var(--border);
@@ -82,50 +51,33 @@
           margin-bottom: 12px;
         }
         
-        /* ===== 文字系统 ===== */
+        /* ===== 文字 ===== */
         h1, h2, h3 {
-          color: var(--text-primary);
-          letter-spacing: -0.02em;
-          font-weight: 600;
+          color: var(--text);
         }
         
         p, span {
           color: var(--text-secondary);
         }
         
-        /* 次要信息 */
         .muted {
           color: var(--text-muted);
-          font-size: 13px;
         }
         
-        /* ===== 按钮（Notion风格）===== */
+        /* ===== 按钮（重点修复）===== */
         button {
           background: var(--panel);
           border: 1px solid var(--border);
-          color: var(--text-primary);
+          color: var(--text);
         
           padding: 8px 12px;
           border-radius: 10px;
         
           cursor: pointer;
-          transition: all 0.15s ease;
         }
         
         button:hover {
           border-color: var(--accent);
-          transform: translateY(-1px);
-        }
-        
-        /* ===== iPad优化 ===== */
-        @media (min-width: 768px) {
-          body {
-            font-size: 15px;
-          }
-        
-          #root {
-            padding: 20px;
-          }
         }
     </style>
     <!-- App模式核心 -->
