@@ -4,109 +4,25 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <style>
-      body {
+       body {
+        margin: 0;
+        padding: 0;
+      
+        min-height: 100vh;
+        width: 100%;
+      
+        background: #0f0f10;
+        color: #e8e8e8;
+      
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
           "PingFang SC", "Helvetica Neue", "Noto Sans SC", sans-serif;
-
+      
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
-
+      
         line-height: 1.6;
         font-size: 16px;
         letter-spacing: 0.2px;
-      }
-
-      h1, h2, h3 {
-        font-weight: 600;
-        letter-spacing: -0.2px;
-      }
-      :root {
-        --bg: #0f0f10;
-        --panel: #17171a;
-        --card: #1f1f23;
-        --text: #e8e8e8;
-        --muted: #a0a0a0;
-        --border: rgba(255,255,255,0.08);
-        --accent: #7c5cff;
-      }
-    
-      body {
-        margin: 0;
-        background: var(--bg);
-        color: var(--text);
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
-          "PingFang SC", "Inter", sans-serif;
-        -webkit-font-smoothing: antialiased;
-        line-height: 1.6;
-      }
-    
-      /* App 容器 */
-      #root {
-        min-height: 100vh;
-        background: radial-gradient(
-          circle at top,
-          #1a1a1f,
-          #0f0f10
-        );
-      }
-    
-      /* 卡片系统（Notion核心） */
-      .card {
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        padding: 16px;
-        margin-bottom: 12px;
-        backdrop-filter: blur(10px);
-      }
-    
-      /* 标题系统 */
-      h1, h2, h3 {
-        letter-spacing: -0.02em;
-        font-weight: 600;
-      }
-    
-      h1 {
-        font-size: 22px;
-      }
-    
-      h2 {
-        font-size: 18px;
-        opacity: 0.9;
-      }
-    
-      /* 次要文字 */
-      .muted {
-        color: var(--muted);
-        font-size: 13px;
-      }
-    
-      /* 按钮（Notion风格） */
-      button {
-        background: var(--card);
-        border: 1px solid var(--border);
-        color: var(--text);
-        padding: 8px 12px;
-        border-radius: 10px;
-        cursor: pointer;
-      }
-    
-      button:hover {
-        border-color: var(--accent);
-      }
-    
-      /* iPad优化 */
-      @media (min-width: 768px) {
-        body {
-          font-size: 15px;
-        }
-    
-        #root {
-          padding: 24px;
-        }
-      }
-      body {
-       color: #e8e8e8 !important;
       }
     </style>
     <!-- App模式核心 -->
@@ -115,7 +31,6 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
     <!-- 防止缩放卡顿 -->
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#000000">
